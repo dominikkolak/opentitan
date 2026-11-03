@@ -1,0 +1,6 @@
+testcase sw/otbn/crypto/tests/rsa_512_dec_test.hjson
+share dmem:rsa_d0:64 d.0
+share dmem:rsa_d1:64 d.1
+boolean d
+waive modexp+0x180 index randomization ((d1 >> 1) ^ d1) ^ d0, mask-xor cant follow the 1 bit shift
+waive modexp+0x1b4 index randomization of the last limb, same as above

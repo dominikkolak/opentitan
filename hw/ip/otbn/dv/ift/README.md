@@ -33,3 +33,10 @@ waive symbol+0x10 reason
 `out`: on return of the routine the loc is a plain share again
 
 TODO: finish readme when core is ready ready!
+
+## performence
+
+p256_ecdsa around 400s to run
+rsa_512 takes around 90s to run
+
+time measured on base ift without extnesions and on a Intel i5-1240P

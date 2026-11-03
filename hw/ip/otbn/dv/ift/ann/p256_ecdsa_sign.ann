@@ -1,0 +1,12 @@
+share dmem:d0:64 d.0
+share dmem:d1:64 d.1
+share dmem:k0:64 k.0
+share dmem:k1:64 k.1
+waive randomize_share+0x8 test harness, same regs for every share
+waive randomize_share+0x38 test harness, same regs for every share
+waive randomize_share+0x3c test harness, same regs for every share
+waive p256_sign+0x118 k*alpha = k0*alpha + k1*alpha, masked by random alpha
+waive p256_sign+0x218 d*alpha = d0*alpha + d1*alpha, masked by random alpha
+waive scalar_mult_int+0xd8 ladder select into URND filled regs
+waive scalar_mult_int+0xdc ladder select into URND filled regs
+waive scalar_mult_int+0xe0 ladder select into URND filled regs
