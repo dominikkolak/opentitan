@@ -20,7 +20,7 @@ from sim.load_elf import load_elf
 from sim.standalonesim import StandaloneSim, _TEST_URND_SEED
 from sim.state import FsmState
 
-from effects import effects, wdr, dmem, register_of, words_of
+from effects import effects, wdr, dmem, register_of, words_of, KEYS
 from mask_xor import MaskXor
 
 # TODO: run fomrat check
@@ -46,7 +46,7 @@ def marker(pc, s):
 
 # TODO: come up with final anotations style
 def load_ann(path, extra_shares): # just a temporery annotation schema
-    ann = {'testcase': None, 'shares': [], 'boolean': [], 'ignore': {}, 'waive': {}}
+    ann = {'testcase': None, 'shares': [], 'boolean': [], 'ignore': {}, 'waive': {}, 'out': []}
     lines = []
     if path:
         lines = open(path).read().splitlines()
@@ -65,6 +65,9 @@ def load_ann(path, extra_shares): # just a temporery annotation schema
             ann['boolean'].append(words[1])
         elif key == 'ignore' or key == 'waive':
             ann[key][words[1]] = words[2] if len(words) > 2 else ''
+        elif key == 'out':
+            # out routine loc who
+            ann['out'].append(tuple(line.split()[1:4]))
         else:
             sys.exit(f'{path}: unknown line: {line}')
     return ann
@@ -143,20 +146,17 @@ class Run:
         self.findings = {}
         self.secret_of = {}
         for spec, who in ann['shares']:
-            # no share index means the secret in clear, so it carries both shares
-            if '.' in who:
-                atoms = [who]
-            else:
-                atoms = [who + '.0', who + '.1']
-            for atom in atoms:
-                self.secret_of[atom] = atom.split('.')[0]
             for loc in self.locations(spec):
-                self.labels[loc] = set(atoms)
+                self.labels[loc] = self.atoms(who)
 
         self.ignored = []
         for name in ann['ignore']:
             start = self.addr(name)
             self.ignored.append((start, self.routine_end(start)))
+        self.outs = []
+        for name, spec, who in ann['out']:
+            start = self.addr(name)
+            self.outs.append((start, self.routine_end(start), spec, who))
         self.waived = {}
         for name in ann['waive']:
             self.waived[self.addr(name)] = ann['waive'][name]
@@ -191,6 +191,7 @@ class Run:
         st.wdrs.commit()
         self.rnd_count = 0
         self.urnd_count = 0
+        self.err_bits = 0
 
     def run(self, trace=False):
         while True:
@@ -216,6 +217,8 @@ class Run:
             insn, _ = self.sim.step(False)
             if fsm != FsmState.EXEC:
                 if st.get_fsm_state() in [FsmState.IDLE, FsmState.LOCKED]:
+                    # set if the program faulted
+                    self.err_bits = st.ext_regs.read('ERR_BITS', True)
                     return None
                 continue
             if insn is not None:
@@ -255,6 +258,8 @@ class Run:
         self.labels.update(new)
         if self.mask_xor:
             self.mask_xor.commit(step)
+        if insn.insn.mnemonic == 'jalr':
+            self.leave(pc)
 
         self.x = list(self.sim.state.gprs.peek_unsigned_values())
         self.retired += 1
@@ -262,6 +267,26 @@ class Run:
 
     def label(self, loc):
         return self.labels.get(loc, set())
+
+    def atoms(self, who):
+        # no share index means the secret in clear, so it carries both shares
+        if '.' in who:
+            atoms = [who]
+        else:
+            atoms = [who + '.0', who + '.1']
+        for atom in atoms:
+            self.secret_of[atom] = atom.split('.')[0]
+        return set(atoms)
+
+    # gadget returns, its outputs are plain shares again
+    def leave(self, pc):
+        for lo, hi, spec, who in self.outs:
+            if lo <= pc < hi:
+                locs = self.locations(spec)
+                for loc in locs:
+                    self.labels[loc] = self.atoms(who)
+                if self.mask_xor:
+                    self.mask_xor.forget(locs)
 
     # secrets shares that all appear in label
     def revealed(self, label):
@@ -343,7 +368,8 @@ class Run:
             rule = 'R7'
         if m.startswith('bn.mulqacc'):
             rule = 'R8'
-        self.check_value(rule, [(loc, 'pre') for loc in e.reads])
+        # flag of bn.sel is an input too
+        self.check_value(rule, [(loc, 'pre') for loc in e.reads + e.selector])
 
         # reg after write
         regs = []
@@ -417,6 +443,8 @@ class Run:
         if spec.startswith('dmem:'):
             _, sym, size = spec.split(':')
             return dmem(self.sim.symbols[sym], int(size) // 4)
+        if spec in KEYS:
+            return KEYS[spec]
         lo, _, hi = spec.partition('-')
         if is_wdr(lo) and is_wdr(hi):
             out = []
@@ -456,10 +484,11 @@ class Run:
         found = sorted(self.findings.values(), key=self.sort_key)
         rows = [['status', 'secret', 'site', 'source', 'instruction', 'rules', 'later', 'reason']]
         for f in found:
+            status = f.status(self.waived)
             reason = self.waived.get(f.pc, '')
-            if not reason and f.reasons:
+            if not reason and f.reasons and status != 'OPEN':
                 reason = min(f.reasons)
-            rows.append([f.status(self.waived), f.secret, self.site(f.pc), self.source(f.pc),
+            rows.append([status, f.secret, self.site(f.pc), self.source(f.pc),
                          self.disasm(f.pc), ' '.join(sorted(f.rules)) or '-', str(len(f.later_sites)), reason])
         if found:
             for r in rows:
@@ -467,6 +496,9 @@ class Run:
         for kind in ['ignore', 'waive']:
             for name in self.ann[kind]:
                 print(f'{kind} {name}: {self.ann[kind][name]}')
+        if self.err_bits:
+            print(f'error: program stopped with ERR_BITS={self.err_bits:#x}, '
+                  f'only {self.retired} instructions were checked', file=sys.stderr)
 
 def text_symbols(path):
     out = set()
@@ -584,6 +616,8 @@ def main():
     run = Run(args.elf, ann, mask_xor=args.mask_xor)
     run.run(trace=args.trace)
     run.report()
+    if run.err_bits:
+        sys.exit(2)
     for f in run.findings.values():
         if f.status(run.waived) in ['OPEN', 'MASK LOST']:
             sys.exit(1)

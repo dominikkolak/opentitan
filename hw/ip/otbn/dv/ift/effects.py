@@ -1,8 +1,15 @@
 # every location: 1x 32-bit word
 
+# effects treated a bn.wsrr from reg 4-7 as loading pub const so reg it wrote 
+# to got NO taint. Keyshares were invisible
+
 ACC = [f'acc.{k}' for k in range(8)]
 MOD = [f'mod.{k}' for k in range(8)]
+KEYS = {name: [f'{name.lower()}.{k}' for k in range(8)]
+        for name in ['KEY_S0_L', 'KEY_S0_H', 'KEY_S1_L', 'KEY_S1_H']}
 WSRS = {0: MOD, 3: ACC}  # WSR 1 and 2 are RND and URND
+# sideload keys, read only
+KEY_WSRS = {4: KEYS['KEY_S0_L'], 5: KEYS['KEY_S0_H'], 6: KEYS['KEY_S1_L'], 7: KEYS['KEY_S1_H']}
 
 ARITH = ['bn.add', 'bn.addc', 'bn.addi', 'bn.sub', 'bn.subb', 'bn.subi', 'bn.cmp', 'bn.cmpb']
 GPR_ALU = ['add', 'sub', 'and', 'or', 'xor', 'sll', 'srl', 'sra',
@@ -151,6 +158,8 @@ def effects(insn, x): # worlds shities decoder :)
             e.write(wdr(o['wrd']), [], 'fresh')
         elif o['wsr'] in WSRS:
             e.copy(wdr(o['wrd']), WSRS[o['wsr']])
+        elif o['wsr'] in KEY_WSRS:
+            e.copy(wdr(o['wrd']), KEY_WSRS[o['wsr']])
         else:
             e.write(wdr(o['wrd']), [], 'const')
 
@@ -214,8 +223,9 @@ def effects(insn, x): # worlds shities decoder :)
         a = e.read(wdr(o['wrs1']))
         b = e.read(wdr(o['wrs2']))
         dst = wdr(o['wrd'])
+        # dst also depends on flag
         for k in range(8):
-            e.write([dst[k]], [a[k], b[k]])
+            e.write([dst[k]], [a[k], b[k]] + e.selector)
 
     elif m.startswith('bn.mulqacc'):
         q1 = 2 * o['wrs1_qwsel']

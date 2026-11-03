@@ -22,9 +22,13 @@ class MaskXor:
         self.staged = {}
         self.fresh = 0
         self.boolean = run.ann['boolean']
+        # keep counting words if share split over lines
+        seen = {}
         for spec, who in run.ann['shares']:
             s, _, j = who.partition('.')
             locs = run.locations(spec)
+            first = seen.get(who, 0)
+            seen[who] = first + len(locs)
             for i in range(len(locs)):
                 if s not in self.boolean or j == '':
                     self.form[locs[i]] = None
@@ -32,7 +36,7 @@ class MaskXor:
                 elif j == '1':
                     self.form[locs[i]] = {f'U:{s}'}
                 else:
-                    self.form[locs[i]] = {f'S:{s}:{i}', f'U:{s}'}
+                    self.form[locs[i]] = {f'S:{s}:{first + i}', f'U:{s}'}
 
     def transfer(self, deps, tag):
         if tag == 'const':
@@ -87,6 +91,11 @@ class MaskXor:
         for loc in self.staged:
             self.prev[(loc, 'last_new')] = self.staged[loc]
         self.form.update(self.staged)
+
+    # unknown again
+    def forget(self, locs):
+        for loc in locs:
+            self.form[loc] = None
 
 # GF(2) reduction
 def reduce(basis, c):

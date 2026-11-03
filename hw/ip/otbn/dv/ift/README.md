@@ -13,6 +13,8 @@ python3 ift.py any.elf -s w11-w12=x.0 -s w18-w19=x.1
 ./build.sh
 ```
 
+exit code: 0 clean, 1 open findings, 2 program faulted (ERR_BITS set)
+
 ## annotations
 
 ```
@@ -21,8 +23,12 @@ share w11-w12 x.0
 share w18-w19 x.1
 share x5 s
 boolean s
+share KEY_S0_L k.0
 ignore arithmetic_to_boolean trusted gadget
+out arithmetic_to_boolean w20-w21 x.0
 waive symbol+0x10 reason
 ```
+
+`out`: on return of the routine the loc is a plain share again
 
 TODO: finish readme when core is ready ready!
