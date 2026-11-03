@@ -1,0 +1,7 @@
+testcase sw/otbn/crypto/tests/p256_arithmetic_to_boolean_test.hjson
+share w11-w12 x.0
+share w18-w19 x.1
+ignore arithmetic_to_boolean trusted gadget (Goubin's A2B), proven separately
+out arithmetic_to_boolean w20-w21 x.0
+waive p256_arithmetic_to_boolean_test+0x18 harness unmasks result
+waive p256_arithmetic_to_boolean_test+0x1c harness unmasks result

@@ -1,0 +1,3 @@
+testcase sw/otbn/crypto/tests/p256_arithmetic_to_boolean_mod_test.hjson
+share w11 x.0
+share w19 x.1
