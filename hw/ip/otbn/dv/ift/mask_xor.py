@@ -21,6 +21,11 @@ class MaskXor:
         self.prev = {}
         self.staged = {}
         self.fresh = 0
+        # hit counts for the summary
+        self.cleared = 0
+        self.unmasked = 0
+        self.unknown = 0
+        self.skipped = 0
         self.boolean = run.ann['boolean']
         # keep counting words if share split over lines
         seen = {}
@@ -61,6 +66,7 @@ class MaskXor:
 
         for hit in hits:
             if hit.secret not in self.boolean:
+                self.skipped += 1
                 continue
             rows = []
             for loc, when in hit.parts:
@@ -70,8 +76,14 @@ class MaskXor:
                     rows.append(self.prev.get((loc, when)))
                 else:
                     rows.append(self.form.get(loc, set()))
-            if None in rows or not masked(rows, hit.secret):
+            # None: a part went through a non xor op
+            if None in rows:
+                self.unknown += 1
                 continue
+            if not masked(rows, hit.secret):
+                self.unmasked += 1
+                continue
+            self.cleared += 1
             masks = set()
             for row in rows:
                 for v in row:
@@ -91,6 +103,18 @@ class MaskXor:
         for loc in self.staged:
             self.prev[(loc, 'last_new')] = self.staged[loc]
         self.form.update(self.staged)
+
+    def summary(self, run):
+        judged = self.cleared + self.unmasked + self.unknown
+        out = f'mask-xor: cleared {self.cleared}/{judged} hits'
+        if judged:
+            out += f' ({self.unmasked} unmasked, {self.unknown} non xor op)'
+        if self.skipped:
+            out += f', {self.skipped} skipped'
+        status = [f.status(run.waived) for f in run.findings.values()]
+        out += (f', root causes: {status.count("CLEARED")} cleared, '
+                f'{status.count("MASK LOST")} mask lost, of {len(status)}')
+        return out
 
     # unknown again
     def forget(self, locs):

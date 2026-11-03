@@ -7,6 +7,7 @@ This tool is....................
 ```
 python3 ift.py elfs/p256_a2b.elf
 python3 ift.py elfs/p256_a2b.elf --trace
+python3 ift.py elfs/r5-masked.elf --trace-all
 python3 ift.py elfs/masked.elf --mask-xor
 python3 ift.py elfs/p256_a2b.elf -a ann/p256_a2b_trusted.ann
 python3 ift.py any.elf -s w11-w12=x.0 -s w18-w19=x.1

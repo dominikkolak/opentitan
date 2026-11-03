@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 
-#TODO: align print output!
-
 import argparse
 import os
+import signal
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,8 +21,6 @@ from sim.state import FsmState
 
 from effects import effects, wdr, dmem, register_of, words_of, KEYS
 from mask_xor import MaskXor
-
-# TODO: run fomrat check
 
 # fixed RND values for now
 # TODO: check if this is a issue
@@ -122,11 +119,13 @@ class Finding:
         return 'OPEN'
 
 class Step:
-    def __init__(self, pc, effects, new, hits):
+    def __init__(self, pc, effects, new, hits, cleared):
         self.pc = pc
         self.effects = effects
         self.new = new
         self.hits = hits
+        # locs that were tainted and are not anymore
+        self.cleared = cleared
 
 class Run:
     
@@ -163,6 +162,7 @@ class Run:
 
         self.x = list(self.sim.state.gprs.peek_unsigned_values())
         self.retired = 0
+        self.hits = 0
         self.mask_xor = None
         if mask_xor:
             self.mask_xor = MaskXor(self)
@@ -193,13 +193,21 @@ class Run:
         self.urnd_count = 0
         self.err_bits = 0
 
-    def run(self, trace=False):
+    # full: every instruction, not only the ones that touch taint
+    def run(self, trace=False, full=False):
+        # trace is printed at the end so the columns can line up
+        rows = [['pc', 'source', 'instruction', 'rules', 'root', 'written', 'label']]
         while True:
             step = self.step()
             if step is None:
-                return self
+                break
             if trace:
-                self.trace(step)
+                row = self.trace(step, full)
+                if row:
+                    rows.append(row)
+        if len(rows) > 1:
+            print_table(rows)
+        return self
 
     # run until 1 inst retires, None when program ends
     def step(self):
@@ -241,13 +249,15 @@ class Run:
         new.pop('x0', None)
 
         hits = self.check(pc, insn.insn.mnemonic, e, new)
-        step = Step(pc, e, new, hits)
+        cleared = [loc for loc in new if not new[loc] and self.label(loc)]
+        step = Step(pc, e, new, hits, cleared)
         if self.mask_xor:
             self.mask_xor.judge(step, hits)
         for hit in hits:
             if hit.root not in self.findings:
                 self.findings[hit.root] = Finding(hit.root[0], hit.root[1])
             self.findings[hit.root].add(hit, pc)
+        self.hits += len(hits)
 
         # what instruction touched, needed for Rule 3 on the next
         self.prev = {}
@@ -456,33 +466,60 @@ class Run:
         return [spec]
 
     # BUG: output turncated sometimes
-    def trace(self, step):
-        regs = {}
+    def trace(self, step, full=False):
+        fresh = [loc for loc, _, tag in step.effects.writes if tag == 'fresh']
+        atoms = {}
+        kind = {}
         for loc in step.new:
             reg = loc if loc.startswith('dmem') else loc.split('.')[0]
-            if reg not in regs:
-                regs[reg] = set()
-            for atom in step.new[loc]:
-                if not atom.startswith('@'):
-                    regs[reg].add(atom)
-        written = []
-        for reg in regs:
-            if regs[reg]:
-                written.append(reg + '=' + ','.join(sorted(regs[reg])))
+            atoms.setdefault(reg, set()).update(a for a in step.new[loc] if not a.startswith('@'))
+            if loc in fresh:
+                kind[reg] = 'fresh'
+            elif loc in step.cleared and reg not in kind:
+                kind[reg] = 'cleared'
+        # label per reg: its shares, else fresh or cleared
+        labels = {}
+        for reg in atoms:
+            if atoms[reg]:
+                labels[reg] = ','.join(sorted(atoms[reg]))
+            elif reg in kind:
+                labels[reg] = kind[reg]
+        written = ''
+        label = ''
+        # all regs got the same label: show it once, else reg=label pairs
+        if len(set(labels.values())) == 1:
+            written = ' '.join(labels)
+            label = next(iter(labels.values())).replace(',', ' ')
+        elif labels:
+            written = ' '.join(reg + '=' + labels[reg] for reg in labels)
         rules = set()
+        roots = set()
         for hit in step.hits:
             rules.add(hit.rule + '(ok)' if hit.cleared else hit.rule)
-        if written or rules:
-            parts = [hex(step.pc), self.source(step.pc), self.disasm(step.pc)] + written + sorted(rules)
-            print(' '.join(parts))
+            if hit.later:
+                roots.add(self.where(hit.root[0]))
+        if full or written or rules:
+            return [hex(step.pc), self.source(step.pc), self.disasm(step.pc), ' '.join(sorted(rules)),
+                    ' '.join(sorted(roots)), written, label]
+        return None
+
+    # source line if known, else symbol+offset
+    def where(self, pc):
+        if pc in self.lines:
+            return self.source(pc)
+        return self.site(pc)
 
     def sort_key(self, finding):
         return (STATUS_ORDER.index(finding.status(self.waived)), finding.pc)
 
     def report(self):
-        print(f'{os.path.basename(self.elf)}: {self.retired} instructions, {len(self.findings)} findings')
+        print(f'\n')
+        causes = 'root cause' if len(self.findings) == 1 else 'root causes'
+        print(f'{os.path.basename(self.elf)}: {self.retired} instructions, {self.hits} hits, '
+              f'{len(self.findings)} {causes}')
         found = sorted(self.findings.values(), key=self.sort_key)
-        rows = [['status', 'secret', 'site', 'source', 'instruction', 'rules', 'later', 'reason']]
+        rows = [['status', 'secret', 'site', 'source', 'instruction', 'rules', 'later sites', 'reason']]
+        print(f'\n')
         for f in found:
             status = f.status(self.waived)
             reason = self.waived.get(f.pc, '')
@@ -491,14 +528,24 @@ class Run:
             rows.append([status, f.secret, self.site(f.pc), self.source(f.pc),
                          self.disasm(f.pc), ' '.join(sorted(f.rules)) or '-', str(len(f.later_sites)), reason])
         if found:
-            for r in rows:
-                print(' | '.join(c or '-' for c in r))
+            print_table(rows)
+        if self.mask_xor:
+            print(f'\n')
+            print(self.mask_xor.summary(self))
         for kind in ['ignore', 'waive']:
             for name in self.ann[kind]:
                 print(f'{kind} {name}: {self.ann[kind][name]}')
         if self.err_bits:
             print(f'error: program stopped with ERR_BITS={self.err_bits:#x}, '
                   f'only {self.retired} instructions were checked', file=sys.stderr)
+
+# pad every column to widest cell
+def print_table(rows):
+    rows = [[c or '-' for c in r] for r in rows]
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    rows.insert(1, ['-' * w for w in widths])
+    for r in rows:
+        print('  '.join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
 
 def text_symbols(path):
     out = set()
@@ -594,6 +641,8 @@ def source_lines(path, program):
     return out
 
 def main():
+    # fix for pipe failures
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     # TODO: add better help msgs
     p = argparse.ArgumentParser(description='IFT OTBN')
     p.add_argument('elf')
@@ -601,6 +650,7 @@ def main():
     p.add_argument('-s', dest='share', action='append', default=[], metavar='LOC=WHO')
     p.add_argument('--mask-xor', action='store_true')
     p.add_argument('--trace', action='store_true')
+    p.add_argument('--trace-all', action='store_true', help='trace every instruction')
     args = p.parse_args()
 
     ann_path = args.ann
@@ -614,7 +664,7 @@ def main():
         print('warning: no shares annotated, nothing secret', file=sys.stderr)
 
     run = Run(args.elf, ann, mask_xor=args.mask_xor)
-    run.run(trace=args.trace)
+    run.run(trace=args.trace or args.trace_all, full=args.trace_all)
     run.report()
     if run.err_bits:
         sys.exit(2)
